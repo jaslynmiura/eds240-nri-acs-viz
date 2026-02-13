@@ -1,0 +1,191 @@
+---
+title: "Visualizing FEMA NRI Data"
+format: pdf
+author: "Jaslyn Miura"
+date: "2026-02-11"
+---
+
+```{r, warning=FALSE, message=FALSE}
+# Load in necessary libraries.
+library(tidyverse)
+library(janitor)
+library(ggridges)
+library(ggplot2)
+library(networkD3)
+library(dplyr)
+library(viridis)
+```
+
+```{r, warning=FALSE, message=FALSE}
+#....Step 1a: see all available ACS variables + descriptions.....
+acs_vars <- tidycensus::load_variables(year = 2023,
+                                       dataset = "acs1")
+
+#..............Step 1b: import race & ethnicity data.............
+race_ethnicity <- tidycensus::get_acs(
+  geography = "county",
+  survey = "acs1",
+  # NOTE: you may not end up using all these variables
+  variables = c("B01003_001", "B02001_002", "B02001_003", 
+                "B02001_004", "B02001_005", "B02001_006",
+                "B02001_007", "B02001_008", "B03002_012",
+                "B03002_002"),
+  state = "CA", 
+  year = 2023) |>
+  # join variable descriptions (so we know what's what!)
+  dplyr::left_join(acs_vars, by = dplyr::join_by(variable == name)) 
+
+#.................Step 2: write ACS data to file.................
+readr::write_csv(race_ethnicity, 
+                 here::here("data", 
+                            "ACS-1yr-2023-county-race-ethnicity.csv"))
+
+#..................Step 3: read in your CSV file.................
+race_ethnicity <- readr::read_csv(here::here("data", 
+                                             "ACS-1yr-2023-county-race-ethnicity.csv"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Load in data and filter to California.
+california_fema_data <- read_csv(here::here(
+  "data", "National_Risk_Index_Counties_807384124455672111.csv")) %>% 
+  clean_names() %>% 
+  filter(state_name == "California")
+```
+
+```{r}
+# Clean and pivot data to prep for joining.
+california_race <- race_ethnicity %>% 
+  clean_names() %>% 
+  separate(name,
+           into = "county",
+           sep = ",") %>% 
+  mutate(county = str_replace(county, "County", "")) %>% 
+  mutate(label = str_replace_all(label, "Estimate!!Total:!!|:", "")) %>% 
+  filter(label != "Estimate!!Total") %>% 
+  pivot_wider(
+    id_cols = c(geoid, county),
+    names_from = label,
+    values_from = estimate)
+```
+
+```{r}
+# Join NRI and ACS data and pivot.
+race_nri <- california_fema_data %>% 
+  left_join(california_race, by = c("state_county_fips_code" = "geoid")) %>% 
+  pivot_longer(cols = c("White alone", 
+                        "Black or African American alone", 
+                        "American Indian and Alaska Native alone", 
+                        "Asian alone", 
+                        "Native Hawaiian and Other Pacific Islander alone", 
+                        "Some Other Race alone", 
+                        "Two or More Races", 
+                        "Not Hispanic or Latino", 
+                        "Hispanic or Latino"),
+               names_to = "group",
+               values_to = "estimate") %>% 
+  drop_na(county) %>% 
+  mutate(county = fct_reorder(.f = county, 
+                              .x = national_risk_index_score_composite))
+```
+
+```{r}
+# Summarize data by groups and NRI Score.
+race_nri_score <- race_nri %>% 
+  group_by(group, national_risk_index_score_composite) %>% 
+  summarise(group_total = sum(estimate),
+            .groups = "drop") %>% 
+  mutate(group = str_remove(group, "alone")) %>% 
+  mutate(group = fct_reorder(.f = as.factor(group), 
+                              .x = group_total)) 
+```
+
+
+```{r}
+# Plot data, attempt 1.
+ggplot(race_nri_score, aes(x = group_total, 
+                           y = group, 
+                           fill = national_risk_index_score_composite)) +
+  geom_col() +
+  scale_fill_viridis_c(option = "magma") +
+  labs(x = "Population Estimate",
+       y = "Ethnic Groups",
+       fill = "National Risk Index Score") +
+  theme_minimal() +
+  theme(legend.position  = "bottom",
+        legend.title.position = "bottom",
+        legend.key.width = unit(2, "cm"),
+        legend.key.height = unit(0.25, "cm"),
+        legend.direction = "horizontal") 
+
+```
+
+```{r}
+# Summarize data by groups and NRI Rating.
+race_nri_rating <- race_nri %>% 
+  group_by(group, national_risk_index_rating_composite) %>% 
+  summarise(group_total = sum(estimate),
+            .groups = "drop") %>% 
+  mutate(group = str_remove(group, "alone")) %>% 
+  mutate(group = fct_reorder(.f = as.factor(group), 
+                             .x = group_total))
+```
+
+```{r}
+# Reorder the ratings.
+race_nri_rating$national_risk_index_rating_composite <- 
+  factor(race_nri_rating$national_risk_index_rating_composite,
+         levels = c("Very High", 
+                    "Relatively High", 
+                    "Relatively Moderate", 
+                    "Relatively Low", 
+                    "Very Low"))
+
+# Assign colors to the ratings.
+rating_colors <- c("Very High" = "#DD4123", 
+                   "Relatively High" = "#ED8B00", 
+                   "Relatively Moderate" = "#EED746", 
+                   "Relatively Low" = "#0D85A0", 
+                   "Very Low" = "#00496F")
+```
+
+```{r}
+#| fig-alt: "Stacked bar chart of the percentage of the population within each National Risk Index Rating, for each ethnic group within California. Within each ethnic group, more than half 50% the population are at a very high risk exposure "
+#| fig-width: 10
+#| fig-height: 6
+
+# Plot NRI Rating by ethnic group.
+ggplot(race_nri_rating, aes(x = group_total, 
+                            y = group, 
+                            fill = national_risk_index_rating_composite)) +
+  geom_col(position = "fill") +
+  scale_x_continuous(labels = scales::label_percent(scale = 100)) +
+  scale_fill_manual(values = rating_colors) +
+  theme_minimal() +
+  theme(legend.position  = "bottom",
+        legend.title.position = "bottom",
+        legend.direction = "horizontal",
+        legend.title = element_blank()) +
+  labs(x = "Percentage of Population",
+       y = "Ethnic Group",
+       title = "Climate Hazard Risk Exposure Across Ethnic Groups in California",
+       subtitle = "For each ethnic group, more than half of the population are at a very high risk exposure.",
+       caption = "Data: FEMA National Risk Index (2025 Release) and United States Census Bureau (2025)")
+```
+
+1. What are your variables of interest and what kinds of data (e.g. numeric, categorical, ordered, etc.) are they (a bullet point list is fine)?
+- `group` - as in ethnic group, (Categorical)
+- `group_total` - as in the total population size for ethnic groups (Numeric)
+- `national_risk_index_rating_composite` (Ordinal)
+
+2. How did you decide which type of graphic form was best suited for answering the question? What alternative graphic forms could you have used instead? Why did you settle on this particular graphic form?
+I first made a bar chart that was colored by a continuous scale to represent the NRI Score but found it challenging to see what score was related to the proportions of the populations. Therefore, I decided to use a different variable, `national_risk_index_rating_composite`, to better summarize the proportion of the population within each NRI rating. By doing so, the proportions are colored by blocks, rather than trying to differentiate the continuous color scale for the different scores at a specific population size within each ethnic group.
+
+3. Summarize your main finding in no more than two sentences.
+For each ethnic group, more than 50% of the population are at a very high risk exposure.
+
+4. What modifications did you make to this visualization to make it more easily readable?
+I selected a color scale that is intuitive, where very high risk is represented by red and relatively low risk is represented by blue. Where red is usually associated with high levels and blue is often used as an opposite color to red.
+
+5. Is there anything you wanted to implement, but didn’t know how? If so, please describe.
+Something I'm curious about is whether the 'Very High' portions of the bar should be flipped to the left side of the graph. This would make it so the stacked bars reflect the ordering of my legend. However, I decided to keep it this way so that the 'Relatively Low' and 'Relatively Moderate' sections of the bar didn't get lost on the right side of the graph. I think this way still draws some attention to them, in the way that the reader will likely notice the smaller portions of these ratings, while reading the y-axis.
